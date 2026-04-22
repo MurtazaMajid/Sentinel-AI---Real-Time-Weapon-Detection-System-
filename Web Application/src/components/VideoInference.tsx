@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { useApi } from "./ConnectionPanel";
 import { useSettings } from "@/store/settings";
 import { detectionStore } from "@/store/detectionStore";
-import { captureFrameBlob, hasThreat, summarizeDetections, toDataUrl } from "@/lib/inference";
+import { captureFrameBlob, hasThreat, isWeaponLabel, summarizeDetections, toDataUrl } from "@/lib/inference";
 import { playAlert } from "@/lib/alert";
 import type { DetectResponse } from "@/types/detection";
 import { Upload, Play, Pause, Loader2, FileVideo, Send } from "lucide-react";
@@ -53,7 +53,7 @@ export function VideoInference() {
           if (now - lastAlertRef.current > 2000) {
             lastAlertRef.current = now;
             if (settings.alertSound) playAlert();
-            const { topLabel, topConfidence } = summarizeDetections(res);
+            const { topLabel, topConfidence } = summarizeDetections(res, settings.threshold);
             detectionStore.add({
               id: crypto.randomUUID(),
               timestamp: now,
@@ -99,11 +99,15 @@ export function VideoInference() {
     setSummary(null);
     try {
       const res = await detectVideo(file, file.name);
-      setSummary({ total: res.total || 0, counts: res.counts || {} });
-      if (res.weapon_alert || res.total > 0) {
+      const counts = res.counts || {};
+      const weaponCounts = Object.fromEntries(
+        Object.entries(counts).filter(([k]) => isWeaponLabel(k))
+      );
+      const weaponTotal = Object.values(weaponCounts).reduce((a, b) => a + b, 0);
+      setSummary({ total: weaponTotal, counts: weaponCounts });
+      if (weaponTotal > 0) {
         if (settings.alertSound) playAlert();
-        const counts = res.counts || {};
-        const [topLabel] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || ["THREAT", 0];
+        const [topLabel] = Object.entries(weaponCounts).sort((a, b) => b[1] - a[1])[0] || ["WEAPON", 0];
         // Use first frame snapshot if available
         const firstFrame = res.frames?.find((f) => f.image_b64);
         const snapshot = firstFrame?.image_b64 ? toDataUrl(firstFrame.image_b64) : (src || "");
@@ -113,13 +117,13 @@ export function VideoInference() {
           source: "video",
           topLabel: String(topLabel).toUpperCase(),
           topConfidence: 0,
-          total: res.total || 0,
-          counts,
+          total: weaponTotal,
+          counts: weaponCounts,
           snapshot,
         });
-        toast.error(`${res.total} threat${res.total !== 1 ? "s" : ""} across video`);
+        toast.error(`${weaponTotal} weapon${weaponTotal !== 1 ? "s" : ""} across video`);
       } else {
-        toast.success("No threats detected in video");
+        toast.success("No weapons detected in video");
       }
     } catch (e: any) {
       toast.error(e.message || "Video analysis failed");

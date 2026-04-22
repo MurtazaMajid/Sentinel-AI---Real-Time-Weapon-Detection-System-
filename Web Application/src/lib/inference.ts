@@ -47,29 +47,46 @@ export function detectionLabel(d: Detection): string {
   return (d.class || d.label || "object").toString();
 }
 
-/** Pick the dominant label/confidence from a response. */
-export function summarizeDetections(r: Pick<DetectResponse, "detections" | "counts">): {
-  topLabel: string;
-  topConfidence: number;
-} {
+/** Keywords that indicate an actual weapon class. */
+const WEAPON_KEYWORDS = [
+  "pistol", "gun", "handgun", "revolver", "firearm", "rifle", "shotgun",
+  "weapon", "knife", "blade", "dagger", "machete", "sword", "grenade",
+];
+
+export function isWeaponLabel(label: string): boolean {
+  const l = label.toLowerCase();
+  return WEAPON_KEYWORDS.some((k) => l.includes(k));
+}
+
+/** Filter detections to actual weapons above the confidence threshold. */
+export function weaponDetections(r: DetectResponse, threshold: number): Detection[] {
+  return (r.detections || []).filter(
+    (d) => d.confidence >= threshold && isWeaponLabel(detectionLabel(d))
+  );
+}
+
+/** Pick the dominant weapon label/confidence from a response. */
+export function summarizeDetections(
+  r: Pick<DetectResponse, "detections" | "counts">,
+  threshold = 0
+): { topLabel: string; topConfidence: number } {
   let top: Detection | undefined;
   for (const d of r.detections || []) {
+    if (d.confidence < threshold) continue;
+    if (!isWeaponLabel(detectionLabel(d))) continue;
     if (!top || d.confidence > top.confidence) top = d;
   }
   if (top) return { topLabel: detectionLabel(top).toUpperCase(), topConfidence: top.confidence };
-  // Fall back to counts
-  const entries = Object.entries(r.counts || {});
+  // Fall back to weapon counts
+  const entries = Object.entries(r.counts || {}).filter(([k]) => isWeaponLabel(k));
   if (entries.length) {
-    const [label, count] = entries.reduce((a, b) => (a[1] > b[1] ? a : b));
+    const [label] = entries.reduce((a, b) => (a[1] > b[1] ? a : b));
     return { topLabel: label.toUpperCase(), topConfidence: 0 };
   }
-  return { topLabel: "THREAT", topConfidence: 0 };
+  return { topLabel: "WEAPON", topConfidence: 0 };
 }
 
-/** Should we treat this response as a threat (above threshold)? */
+/** Should we treat this response as a real weapon threat (above threshold)? */
 export function hasThreat(r: DetectResponse, threshold: number): boolean {
-  if (r.weapon_alert && (r.detections?.length || 0) === 0 && r.total === 0) return false;
-  if (r.detections?.some((d) => d.confidence >= threshold)) return true;
-  // Some servers may not return per-detection confidence — fall back to weapon_alert + total
-  return r.weapon_alert && r.total > 0;
+  return weaponDetections(r, threshold).length > 0;
 }

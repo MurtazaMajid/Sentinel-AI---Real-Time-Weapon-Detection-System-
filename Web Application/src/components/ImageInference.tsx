@@ -42,7 +42,7 @@ export function ImageInference() {
       const annotated = toDataUrl(res.image_b64);
       if (hasThreat(res, settings.threshold)) {
         if (settings.alertSound) playAlert();
-        const { topLabel, topConfidence } = summarizeDetections(res);
+        const { topLabel, topConfidence } = summarizeDetections(res, settings.threshold);
         detectionStore.add({
           id: crypto.randomUUID(),
           timestamp: Date.now(),
@@ -53,7 +53,7 @@ export function ImageInference() {
           counts: res.counts,
           snapshot: annotated,
         });
-        toast.error(`${res.total} threat${res.total !== 1 ? "s" : ""} detected`);
+        toast.error(`Weapon detected · ${topLabel}`);
       } else {
         toast.success("No threats detected");
       }

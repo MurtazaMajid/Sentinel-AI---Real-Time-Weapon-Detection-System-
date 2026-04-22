@@ -8,6 +8,7 @@ import { playAlert } from "@/lib/alert";
 import type { DetectResponse } from "@/types/detection";
 import { Camera, CameraOff, Radio } from "lucide-react";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 export function LiveInference() {
   const { status, detectFrame } = useApi();
@@ -21,6 +22,7 @@ export function LiveInference() {
   const analyzingRef = useRef(false);
   const [fps, setFps] = useState(0);
   const lastAlertRef = useRef(0);
+  const lastEmailRef = useRef(0);
 
   useEffect(() => () => stop(), []);
 
@@ -55,32 +57,58 @@ export function LiveInference() {
     if (!v) return;
     let frames = 0;
     let bucket = performance.now();
-    while (analyzingRef.current && streamRef.current) {
-      const interval = 1000 / Math.max(1, settings.fps);
-      const t0 = performance.now();
+    // Allow up to 2 in-flight requests so a slow server doesn't freeze the preview
+    const MAX_INFLIGHT = 2;
+    let inflight = 0;
+
+    const sendOne = async () => {
+      inflight++;
       try {
-        const { blob } = await captureFrameBlob(v, 640, 0.6);
+        const { blob } = await captureFrameBlob(v, 480, 0.55);
         const res = await detectFrame(blob);
-        if (!analyzingRef.current) break;
+        if (!analyzingRef.current) return;
         setLast(res);
         setAnnotated(toDataUrl(res.image_b64));
         if (hasThreat(res, settings.threshold)) {
           const now = Date.now();
-          // throttle alerts/log to once every 2s to avoid spam
           if (now - lastAlertRef.current > 2000) {
             lastAlertRef.current = now;
             if (settings.alertSound) playAlert();
-            const { topLabel, topConfidence } = summarizeDetections(res);
+            const { topLabel, topConfidence } = summarizeDetections(res, settings.threshold);
+            const weapons = res.detections?.filter((d) => d.confidence >= settings.threshold) ?? [];
+            const snapshot = toDataUrl(res.image_b64);
             detectionStore.add({
               id: crypto.randomUUID(),
               timestamp: now,
               source: "live",
               topLabel,
               topConfidence,
-              total: res.total,
+              total: weapons.length || res.total,
               counts: res.counts,
-              snapshot: toDataUrl(res.image_b64),
+              snapshot,
             });
+            // Throttle email alerts: at most one every 30s
+            if (now - lastEmailRef.current > 30_000) {
+              lastEmailRef.current = now;
+              const imageBase64 = snapshot.startsWith("data:")
+                ? snapshot.split(",")[1]
+                : snapshot;
+              supabase.functions
+                .invoke("send-threat-alert", {
+                  body: {
+                    label: topLabel,
+                    confidence: topConfidence,
+                    source: "Live camera",
+                    timestamp: new Date(now).toISOString(),
+                    imageBase64,
+                  },
+                })
+                .then(({ error }) => {
+                  if (error) console.error("Alert email failed", error);
+                  else toast.success("Threat alert email sent", { duration: 2000 });
+                })
+                .catch((e) => console.error("Alert email failed", e));
+            }
           }
         }
         frames++;
@@ -89,11 +117,23 @@ export function LiveInference() {
           frames = 0;
           bucket = performance.now();
         }
-      } catch (e) {
-        // swallow per-frame errors
+      } catch {
+        /* swallow per-frame errors */
+      } finally {
+        inflight--;
       }
-      const elapsed = performance.now() - t0;
-      await new Promise((r) => setTimeout(r, Math.max(0, interval - elapsed)));
+    };
+
+    let lastDispatch = 0;
+    while (analyzingRef.current && streamRef.current) {
+      const interval = 1000 / Math.max(1, settings.fps);
+      const now = performance.now();
+      if (inflight < MAX_INFLIGHT && now - lastDispatch >= interval) {
+        lastDispatch = now;
+        sendOne();
+      }
+      // Yield to the browser so the <video> element keeps painting smoothly
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
     }
   };
 
@@ -136,14 +176,19 @@ export function LiveInference() {
       </div>
 
       <div className="relative aspect-video bg-secondary/40 border border-border rounded-sm overflow-hidden flex items-center justify-center">
-        {/* Hidden raw video — we display the server-annotated frames when available */}
+        {/* Always show the live webcam for smooth preview */}
         <video
           ref={videoRef}
           playsInline muted
-          className={`max-w-full max-h-full ${annotated ? "hidden" : ""}`}
+          className="max-w-full max-h-full"
         />
-        {annotated && (
-          <img src={annotated} alt="annotated" className="max-w-full max-h-full object-contain" />
+        {/* Server-annotated frame overlaid only when a weapon is detected */}
+        {annotated && analyzing && threat && (
+          <img
+            src={annotated}
+            alt="annotated"
+            className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+          />
         )}
         {!streaming && (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-xs text-muted-foreground">
@@ -160,9 +205,9 @@ export function LiveInference() {
           </div>
         )}
         {threat && (
-          <div className="absolute top-3 left-3 flex items-center gap-2 bg-destructive/90 text-destructive-foreground px-3 py-1.5 rounded-sm text-xs font-bold tracking-widest animate-pulse-threat">
+          <div className="absolute top-3 left-3 flex items-center gap-2 bg-destructive/90 text-destructive-foreground px-3 py-1.5 rounded-sm text-xs font-bold tracking-widest animate-pulse-threat z-10">
             <span className="h-2 w-2 bg-destructive-foreground rounded-full" />
-            THREAT · {last!.total}
+            WEAPON · {last ? (last.detections?.filter((d) => d.confidence >= settings.threshold).length || last.total) : 0}
           </div>
         )}
       </div>
